@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Meme Runner v2.0</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #202020;
+            overflow: hidden;
+            touch-action: none;
+            font-family: 'Segoe UI', sans-serif;
+            user-select: none;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        /* UI LAYOUT */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column;
+        }
+        
+        #hud {
+            padding: 20px; display: flex; justify-content: space-between; align-items: center;
+            font-size: 24px; color: #fff; text-shadow: 2px 2px 0 #000; font-weight: bold;
+        }
+        
+        .hud-group { display: flex; gap: 20px; }
+        .active-powerup {
+            background: rgba(0,0,0,0.5); padding: 5px 15px; border-radius: 20px;
+            display: none; align-items: center; gap: 10px; border: 2px solid #fff;
+        }
+        
+        .screen {
+            pointer-events: auto; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.8); display: flex; flex-direction: column;
+            justify-content: center; align-items: center; color: white; z-index: 10;
+        }
+        
+        h1 { font-size: 4rem; margin: 0 0 20px 0; color: #00e5ff; text-shadow: 4px 4px 0 #000; text-transform: uppercase; text-align: center;}
+        p { font-size: 1.5rem; margin-bottom: 30px; color: #ddd; }
+        
+        button {
+            background: #ff0055; color: white; border: none; padding: 15px 50px;
+            font-size: 1.5rem; border-radius: 8px; cursor: pointer;
+            box-shadow: 0 6px 0 #900; transition: transform 0.1s;
+        }
+        button:active { transform: translateY(4px); box-shadow: 0 2px 0 #900; }
+        
+        #game-over-screen { display: none; }
+        
+        /* Powerup timers */
+        #shield-status { color: #00ffaa; }
+        #magnet-status { color: #ff0055; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="hud">
+            <div class="hud-group">
+                <div>SCORE: <span id="score-el" style="color:#FFD700">0</span></div>
+                <div>COINS: <span id="coin-el" style="color:#FFD700">0</span></div>
+            </div>
+            <div class="hud-group">
+                <div id="shield-hud" class="active-powerup">🛡️ ACTIVE</div>
+                <div id="magnet-hud" class="active-powerup">🧲 <span id="mag-timer">0s</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="start-screen" class="screen">
+        <h1>Meme Runner<br><span style="font-size:2rem; color:white">v2.0</span></h1>
+        <p>Arrows/WASD to Move • Space to Jump</p>
+        <button id="start-btn">PLAY</button>
+    </div>
+
+    <div id="game-over-screen" class="screen">
+        <h1>WASTED</h1>
+        <p>Score: <span id="final-score">0</span></p>
+        <button id="restart-btn">TRY AGAIN</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            laneWidth: 150,
+            horizonY: 0.35,
+            cameraHeight: 280, // High camera
+            speedBase: 400,
+            speedMax: 1600,
+            gravity: 2500,
+            jumpForce: 950,
+            laneChangeSpeed: 8,
+            renderDistance: 5000
+        };
+
+        // --- ASSETS ---
+        const assets = { images: {}, audio: {} };
+        
+        // UPDATED ASSET LIST
+        const imageSources = {
+            run1: 'assets/player_run1.png',
+            run2: 'assets/player_run2.png',
+            jump: 'assets/player_jump.png',
+            ob1: 'assets/ob_face_1.png',
+            ob2: 'assets/ob_face_2.png',
+            ob3: 'assets/ob_face_3.png',
+            sky: 'assets/sky.png',
+            floor: 'assets/floor.png',
+            iconMag: 'assets/icon_magnet.png',
+            iconShield: 'assets/icon_shield.png'
+        };
+
+        const audioSources = {
+            bgm: 'assets/bgm.mp3',
+            jump: 'assets/jump.mp3',
+            hit: 'assets/hit.mp3',
+            coin: 'assets/coin.mp3'
+        };
+
+        // --- GAME STATE ---
+        let canvas, ctx;
+        let lastTime = 0;
+        let isRunning = false;
+        let score = 0, coinsCollected = 0;
+        let gameSpeed = CONFIG.speedBase;
+        let distanceTraveled = 0;
+        
+        // Global Scrolling Values
+        let skyOffset = 0;
+        let floorOffset = 0;
+
+        // Powerup State
+        const powerups = {
+            magnet: { active: false, timer: 0, duration: 10 }, // 10 seconds
+            shield: { active: false } // One hit protection
+        };
+
+        const player = {
+            lane: 0, x: 0, y: 0, z: 200, vy: 0,
+            isGrounded: true,
+            frameTimer: 0, // For animation
+            runFrame: 0,   // 0 or 1
+            modelY: 0
+        };
+
+        let obstacles = [];
+        let coins = [];
+        let powerupItems = []; // Floating items on track
+        let particles = [];
+
+        // --- INIT ---
+        window.onload = () => {
+            canvas = document.getElementById('gameCanvas');
+            ctx = canvas.getContext('2d');
+            resize();
+            window.addEventListener('resize', resize);
+            loadAssets();
+            setupInput();
+
+            document.getElementById('start-btn').addEventListener('click', startGame);
+            document.getElementById('restart-btn').addEventListener('click', resetGame);
+        };
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function loadAssets() {
+            for (let key in imageSources) {
+                const img = new Image();
+                img.src = imageSources[key];
+                assets.images[key] = img;
+            }
+            for (let key in audioSources) {
+                const aud = new Audio();
+                aud.src = audioSources[key];
+                assets.audio[key] = aud;
+            }
+            assets.audio.bgm.loop = true;
+            assets.audio.bgm.volume = 0.5;
+        }
+
+        function playSound(name) {
+            const sound = assets.audio[name];
+            if (sound) {
+                if(name !== 'bgm') sound.currentTime = 0;
+                sound.play().catch(()=>{});
+            }
+        }
+
+        // --- LOGIC ---
+
+        function startGame() {
+            document.getElementById('start-screen').style.display = 'none';
+            document.getElementById('game-over-screen').style.display = 'none';
+            playSound('bgm');
+            resetGameVariables();
+            isRunning = true;
+            lastTime = performance.now();
+            requestAnimationFrame(loop);
+        }
+
+        function resetGame() {
+            document.getElementById('game-over-screen').style.display = 'none';
+            resetGameVariables();
+            playSound('bgm');
+            isRunning = true;
+            lastTime = performance.now();
+            requestAnimationFrame(loop);
+        }
+
+        function resetGameVariables() {
+            score = 0; coinsCollected = 0;
+            gameSpeed = CONFIG.speedBase; distanceTraveled = 0;
+            spawnTimer = -CONFIG.renderDistance * 2; 
+
+            player.lane = 0; player.x = 0; player.y = 0; player.vy = 0;
+            
+            obstacles = []; coins = []; powerupItems = []; particles = [];
+            
+            powerups.magnet.active = false;
+            powerups.shield.active = false;
+            
+            updateHUD();
+        }
+
+        function loop(timestamp) {
+            if (!isRunning) return;
+            const dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+            update(dt);
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        function update(dt) {
+            // 1. Difficulty & Score
+            gameSpeed += dt * 1.7; 
+            if(gameSpeed > CONFIG.speedMax) gameSpeed = CONFIG.speedMax;
+            distanceTraveled += gameSpeed * dt;
+            
+            // Score calculation
+            let mult = powerups.magnet.active ? 2 : 1; // Maybe magnet also gives 2x score?
+            score = Math.floor(distanceTraveled / 100) + (coinsCollected * 50);
+            
+            // 2. Background Scrolling
+            skyOffset = (skyOffset + dt * 20) % canvas.width;
+            floorOffset = (floorOffset + (gameSpeed * dt)) % 200; // Loop every 200 units
+
+            // 3. Player Logic
+            const targetX = player.lane * CONFIG.laneWidth;
+            player.x += (targetX - player.x) * CONFIG.laneChangeSpeed * dt;
+
+            // Gravity
+            if (!player.isGrounded) {
+                player.vy -= CONFIG.gravity * dt;
+                player.y += player.vy * dt;
+                if (player.y <= 0) {
+                    player.y = 0; player.vy = 0; player.isGrounded = true;
+                }
+            }
+
+            // Animation Timing
+            player.frameTimer += dt;
+            if(player.frameTimer > 0.15) { // Change step every 0.15s
+                player.runFrame = 1 - player.runFrame;
+                player.frameTimer = 0;
+            }
+            // Bobbing
+            player.modelY = Math.abs(Math.sin(distanceTraveled / 50)) * 10;
+
+            // 4. Powerup Timers
+            if(powerups.magnet.active) {
+                powerups.magnet.timer -= dt;
+                if(powerups.magnet.timer <= 0) powerups.magnet.active = false;
+            }
+            updateHUD();
+
+            // 5. Spawning
+            spawnManager();
+
+            // 6. Entity Updates
+            updateEntities(dt);
+        }
+
+        function updateEntities(dt) {
+            // Obstacles
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                let ob = obstacles[i];
+                ob.z -= gameSpeed * dt;
+                
+                if (checkCollision(player, ob)) {
+                    if(powerups.shield.active) {
+                        // Shield Break
+                        powerups.shield.active = false;
+                        createParticles(0, 200, '#00ffaa', 30); // Shield break effect
+                        playSound('hit');
+                        obstacles.splice(i, 1); // Destroy obstacle
+                    } else {
+                        gameOver();
+                    }
+                }
+                if (ob.z < -200) obstacles.splice(i, 1);
+            }
+
+            // Coins
+            for (let i = coins.length - 1; i >= 0; i--) {
+                let c = coins[i];
+                c.z -= gameSpeed * dt;
+                c.rot += dt * 5;
+
+                // MAGNET LOGIC
+                if(powerups.magnet.active && c.z < 1000 && c.z > -100) {
+                    // Lerp X towards player
+                    const lerpSpeed = 8 * dt;
+                    c.x += (player.x - c.x) * lerpSpeed;
+                    c.y += (player.y + 50 - c.y) * lerpSpeed; // Fly up to player
+                }
+
+                if (checkCollision(player, c, true)) {
+                    coinsCollected++;
+                    playSound('coin');
+                    createParticles(c.x, c.z, '#FFD700', 5);
+                    coins.splice(i, 1);
+                } else if (c.z < -200) coins.splice(i, 1);
+            }
+
+            // Powerups
+            for(let i = powerupItems.length - 1; i >= 0; i--) {
+                let p = powerupItems[i];
+                p.z -= gameSpeed * dt;
+                p.bobOffset += dt * 5;
+                
+                if(checkCollision(player, p, true)) {
+                    activatePowerup(p.type);
+                    playSound('coin'); // Reuse coin sound for now
+                    createParticles(p.x, p.z, p.type === 'magnet' ? '#ff0055' : '#00ffaa', 20);
+                    powerupItems.splice(i, 1);
+                } else if (p.z < -200) powerupItems.splice(i, 1);
+            }
+
+            // Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx; p.y += p.vy; p.life -= dt;
+                if(p.life <= 0) particles.splice(i, 1);
+            }
+        }
+
+        let spawnTimer = 0;
+        function spawnManager() {
+            const spawnInterval = 180000 / gameSpeed;
+            if (distanceTraveled - spawnTimer > spawnInterval) {
+                spawnTimer = distanceTraveled;
+                const lanes = [-1, 0, 1];
+                const occupied = [];
+
+                // 1. Spawn Obstacles
+                const numObs = Math.random() > 0.93 ? 2 : 1;
+                for(let i=0; i<numObs; i++) {
+                    const lane = lanes[Math.floor(Math.random() * lanes.length)];
+                    if(!occupied.includes(lane)) {
+                        obstacles.push({
+                            lane: lane, x: lane * CONFIG.laneWidth, z: CONFIG.renderDistance,
+                            type: Math.floor(Math.random() * 3) + 1
+                        });
+                        occupied.push(lane);
+                    }
+                }
+
+                // 2. Spawn Powerups (Rare: 10% chance)
+                if(Math.random() < 0.1) {
+                    const freeLanes = lanes.filter(l => !occupied.includes(l));
+                    if(freeLanes.length > 0) {
+                        const lane = freeLanes[Math.floor(Math.random() * freeLanes.length)];
+                        powerupItems.push({
+                            lane: lane, x: lane * CONFIG.laneWidth, z: CONFIG.renderDistance,
+                            type: Math.random() > 0.5 ? 'magnet' : 'shield',
+                            bobOffset: 0
+                        });
+                        occupied.push(lane);
+                    }
+                }
+
+                // 3. Spawn Coins in remaining lanes
+                lanes.forEach(l => {
+                    if(!occupied.includes(l) && Math.random() > 0.4) {
+                        // Spawn a line of 3 coins
+                        for(let k=0; k<3; k++) {
+                            coins.push({
+                                lane: l, x: l * CONFIG.laneWidth, z: CONFIG.renderDistance + (k * 150),
+                                rot: 0, y: 40
+                            });
+                        }
+                    }
+                });
+            }
+        }
+
+        function activatePowerup(type) {
+            if(type === 'magnet') {
+                powerups.magnet.active = true;
+                powerups.magnet.timer = powerups.magnet.duration;
+            } else if (type === 'shield') {
+                powerups.shield.active = true;
+            }
+            updateHUD();
+        }
+
+        function checkCollision(p, e, isTrigger = false) {
+            // Hitboxes
+            const depthHit = e.z < p.z + 50 && e.z > p.z - 50;
+            
+            // X Collision (use visual x for smooth magnet pickup)
+            let xHit = false;
+            if(isTrigger) {
+                // For coins/powerups, simple distance check
+                xHit = Math.abs(e.x - p.x) < 60;
+            } else {
+                // For obstacles, strict lane check
+                xHit = Math.abs(e.lane - Math.round(p.x / CONFIG.laneWidth)) < 0.1; 
+            }
+
+            let yHit = true;
+            if(isTrigger) {
+                yHit = p.y < 150; // Can pick up ground items
+            }
+
+            return depthHit && xHit && yHit;
+        }
+
+        function createParticles(x, z, color, count) {
+            for(let i=0; i<count; i++) {
+                particles.push({
+                    x: x, z: z, y: 30,
+                    vx: (Math.random() - 0.5) * 150, vy: Math.random() * 200,
+                    life: 0.6, color: color
+                });
+            }
+        }
+
+        function gameOver() {
+            isRunning = false;
+            playSound('hit');
+            assets.audio.bgm.pause();
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('game-over-screen').style.display = 'flex';
+        }
+
+        function updateHUD() {
+            document.getElementById('score-el').innerText = score;
+            document.getElementById('coin-el').innerText = coinsCollected;
+            
+            // Powerup UI
+            const shieldEl = document.getElementById('shield-hud');
+            const magEl = document.getElementById('magnet-hud');
+            
+            shieldEl.style.display = powerups.shield.active ? 'flex' : 'none';
+            
+            if(powerups.magnet.active) {
+                magEl.style.display = 'flex';
+                document.getElementById('mag-timer').innerText = Math.ceil(powerups.magnet.timer) + 's';
+            } else {
+                magEl.style.display = 'none';
+            }
+        }
+
+        // --- RENDER ---
+
+        function project(x, y, z) {
+            const fov = 350;
+            const scale = fov / (fov + z);
+            const screenX = (canvas.width / 2) + (x * scale);
+            const screenY = (canvas.height * CONFIG.horizonY) + ((CONFIG.cameraHeight - y) * scale);
+            return { x: screenX, y: screenY, scale: scale };
+        }
+
+        function draw() {
+            // 1. SKY (Scrolling)
+            if(assets.images.sky.complete) {
+                // Draw twice for infinite loop
+                const bgW = canvas.width; // Stretch to fit
+                const bgH = canvas.height * 0.6;
+                const x = -skyOffset * 0.2; // Parallax slow
+                
+                // Simple solid color behind sky just in case
+                ctx.fillStyle = "#87CEEB";
+                ctx.fillRect(0,0,canvas.width, canvas.height);
+                
+                // Draw Image
+                ctx.drawImage(assets.images.sky, 0, 0, assets.images.sky.width, assets.images.sky.height, 0, 0, canvas.width, canvas.height);
+            } else {
+                // Fallback
+                ctx.fillStyle = "#87CEEB";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            // 2. FLOOR
+            // We can't easily texture map without WebGL, so we stick to the grid 
+            // but draw a dark ground below horizon
+            const horizonLine = canvas.height * CONFIG.horizonY;
+            ctx.fillStyle = "#1a5e2a"; // Dark grass
+            ctx.fillRect(0, horizonLine, canvas.width, canvas.height - horizonLine);
+            
+            drawFloorGrid();
+
+            // 3. ENTITIES
+            let renderList = [];
+            renderList.push({ type: 'player', z: player.z, obj: player });
+            obstacles.forEach(ob => renderList.push({ type: 'obstacle', z: ob.z, obj: ob }));
+            coins.forEach(c => renderList.push({ type: 'coin', z: c.z, obj: c }));
+            powerupItems.forEach(p => renderList.push({ type: 'powerup', z: p.z, obj: p }));
+            
+            renderList.sort((a, b) => b.z - a.z);
+
+            renderList.forEach(item => {
+                if (item.type === 'player') drawPlayer(item.obj);
+                else if (item.type === 'obstacle') drawObstacle(item.obj);
+                else if (item.type === 'coin') drawCoin(item.obj);
+                else if (item.type === 'powerup') drawPowerup(item.obj);
+            });
+
+            // Particles
+            particles.forEach(p => {
+                const proj = project(p.x, p.y, p.z);
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y, 6 * proj.scale, 0, Math.PI*2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            });
+        }
+
+        function drawFloorGrid() {
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "rgba(255,255,255,0.2)";
+            
+            // Longitudinal lines
+            for(let l = -1.5; l <= 1.5; l++) {
+                const start = project(l * CONFIG.laneWidth, 0, -100);
+                const end = project(l * CONFIG.laneWidth, 0, CONFIG.renderDistance);
+                ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y); ctx.stroke();
+            }
+            
+            // Horizontal moving lines (The sensation of speed)
+            // We assume a stripe every 200 units
+            const startZ = Math.floor((player.z - 200) / 200) * 200;
+            
+            for(let z = 0; z < CONFIG.renderDistance; z += 200) {
+                const actualZ = startZ + z - floorOffset;
+                if(actualZ < -100) continue;
+                
+                const left = project(-1.5 * CONFIG.laneWidth, 0, actualZ);
+                const right = project(1.5 * CONFIG.laneWidth, 0, actualZ);
+                
+                ctx.beginPath(); ctx.moveTo(left.x, left.y); ctx.lineTo(right.x, right.y); ctx.stroke();
+            }
+        }
+
+        function drawPlayer(p) {
+            const proj = project(p.x, p.y, p.z);
+            const s = proj.scale;
+            const w = 70 * s, h = 110 * s;
+            
+            // Shadow
+            const shadow = project(p.x, 0, p.z);
+            ctx.fillStyle = "rgba(0,0,0,0.5)";
+            ctx.beginPath(); ctx.ellipse(shadow.x, shadow.y, w/1.2, w/4, 0, 0, Math.PI*2); ctx.fill();
+
+            // Determine Sprite
+            let sprite = assets.images.run1;
+            if(!p.isGrounded) sprite = assets.images.jump;
+            else if(p.runFrame === 1) sprite = assets.images.run2;
+
+            // Draw Sprite
+            if (sprite && sprite.complete) {
+                // Adjust aspect ratio of image to fit box
+                ctx.drawImage(sprite, 
+                    proj.x - w/2, 
+                    proj.y - h + p.modelY, 
+                    w, h
+                );
+            } else {
+                // Fallback box
+                ctx.fillStyle = "blue";
+                ctx.fillRect(proj.x - w/2, proj.y - h + p.modelY, w, h);
+            }
+            
+            // Draw Shield Effect
+            if(powerups.shield.active) {
+                ctx.strokeStyle = "rgba(0, 255, 170, 0.6)";
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y - h/2 + p.modelY, w, 0, Math.PI*2);
+                ctx.stroke();
+                ctx.fillStyle = "rgba(0, 255, 170, 0.2)";
+                ctx.fill();
+            }
+        }
+
+        function drawObstacle(ob) {
+            const proj = project(ob.x, 0, ob.z);
+            const s = proj.scale;
+            const w = 180 * s, h = 220 * s;
+
+            // Draw Image or Box
+            const imgKey = 'ob' + ob.type;
+            if(assets.images[imgKey] && assets.images[imgKey].complete) {
+                ctx.drawImage(assets.images[imgKey], proj.x - w/2, proj.y - h, w, h);
+            } else {
+                ctx.fillStyle = "#555";
+                ctx.fillRect(proj.x - w/2, proj.y - h, w, h);
+            }
+        }
+
+        function drawCoin(c) {
+            const proj = project(c.x, c.y || 40, c.z);
+            const s = proj.scale;
+            const size = 45 * s;
+            const w = size * Math.abs(Math.cos(c.rot));
+
+            ctx.fillStyle = "#FFD700"; ctx.strokeStyle = "#FFA500"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.ellipse(proj.x, proj.y, w/2, size/2, 0, 0, Math.PI*2);
+            ctx.fill(); ctx.stroke();
+        }
+
+        function drawPowerup(p) {
+            const bob = Math.sin(Date.now()/200 + p.bobOffset) * 10;
+            const proj = project(p.x, 50 + bob, p.z);
+            const s = proj.scale;
+            const size = 60 * s;
+
+            const img = p.type === 'magnet' ? assets.images.iconMag : assets.images.iconShield;
+            
+            if(img && img.complete) {
+                ctx.drawImage(img, proj.x - size/2, proj.y - size/2, size, size);
+            } else {
+                ctx.fillStyle = p.type === 'magnet' ? 'red' : 'green';
+                ctx.fillRect(proj.x - size/2, proj.y - size/2, size, size);
+            }
+        }
+
+        // --- INPUT ---
+        function setupInput() {
+            window.addEventListener('keydown', (e) => {
+                if (!isRunning) return;
+                if (['ArrowLeft','a','A'].includes(e.key)) changeLane(-1);
+                if (['ArrowRight','d','D'].includes(e.key)) changeLane(1);
+                if (['ArrowUp',' ','w','W'].includes(e.key) && player.isGrounded) jump();
+            });
+            
+            let tsX = 0, tsY = 0;
+            canvas.addEventListener('touchstart', e => { tsX = e.changedTouches[0].screenX; tsY = e.changedTouches[0].screenY; }, {passive:false});
+            canvas.addEventListener('touchend', e => {
+                if(!isRunning) return;
+                handleSwipe(tsX, tsY, e.changedTouches[0].screenX, e.changedTouches[0].screenY);
+            }, {passive:false});
+        }
+
+        function changeLane(dir) {
+            const n = player.lane + dir;
+            if (n >= -1 && n <= 1) player.lane = n;
+        }
+        function jump() {
+            player.vy = CONFIG.jumpForce; player.isGrounded = false; playSound('jump');
+        }
+        function handleSwipe(x1, y1, x2, y2) {
+            const dx = x2 - x1, dy = y2 - y1;
+            if (Math.abs(dx) > Math.abs(dy)) {
+                if (Math.abs(dx) > 30) changeLane(dx > 0 ? 1 : -1);
+            } else {
+                if (dy < -30 && player.isGrounded) jump();
+            }
+        }
+
+    </script>
+</body>
+</html>
